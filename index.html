@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Samya: NeuroPath</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- Import p5.js (Graphics) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/addons/p5.sound.min.js"></script>
+  
+  <!-- Import ml5.js (Hand Tracking) -->
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #2c3e50; /* Dark background for outside canvas */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Arial', sans-serif;
+    }
+    canvas {
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      border-radius: 10px;
+    }
+    #loading {
+      position: absolute;
+      color: white;
+      font-size: 24px;
+      background: rgba(0,0,0,0.8);
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      z-index: 10;
+    }
+    #loading small {
+      display: block;
+      font-size: 14px;
+      margin-top: 10px;
+      color: #aaa;
+    }
+    #instructions {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(10, 25, 15, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 30;
+    }
+    .instructions-panel {
+      width: 90%;
+      max-width: 520px;
+      background: #ffffff;
+      color: #1b3a2b;
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 20px 45px rgba(0,0,0,0.35);
+      text-align: center;
+    }
+    .instructions-panel h1 {
+      font-size: 32px;
+      margin-bottom: 16px;
+      letter-spacing: 1px;
+    }
+    .instructions-panel p {
+      font-size: 18px;
+      line-height: 1.6;
+      margin: 12px 0;
+    }
+    .instructions-panel em {
+      font-style: normal;
+      color: #f39c12;
+      font-weight: bold;
+    }
+    .instructions-panel button {
+      margin-top: 24px;
+      background: linear-gradient(135deg, #27ae60, #2ecc71);
+      color: #ffffff;
+      border: none;
+      border-radius: 999px;
+      padding: 14px 32px;
+      font-size: 18px;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .instructions-panel button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 24px rgba(39, 174, 96, 0.45);
+    }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  Initializing AI...
+  <small>Allow camera access when prompted.</small>
+</div>
+
+<div id="instructions">
+  <div class="instructions-panel">
+    <h1>Namaste, Welcome to Samya NeuroPath Game</h1>
+    <p>Raise your hand to start the journey. You will see a path to follow in the maze that you need to memorize.</p>
+    <p>Pinch your <em>thumb</em> and <em>index finger</em> together to trace the memorized path.</p>
+    <p>Reach the flower at the maze's end to make it bloom and cue the next melody.</p>
+    <button id="instruction-close">Start</button>
+  </div>
+</div>
+
+<script>
+const C_BG = "#fafcf5";         
+const C_GRID = "#e6ebe1";       
+const C_WALL = "#556b2f";       
+const C_PLAYER = "#ffd700";     
+const C_PLAYER_GLOW = "#ffa500";
+const C_PATH = "#9acd32";       
+const C_TRACE = "#ffdfba";      
+const C_SEED = "#8b4513";       
+const C_FLOWER = "#ff69b4";     
+const C_UI_PANEL = "#ffffff";
+const C_TEXT = "#3c3c3c";
+
+// States
+const STATE_WAITING = -1;
+const STATE_SHOWING = 0;
+const STATE_DELAY = 1;
+const STATE_PLAYING = 2;
+const STATE_WIN = 3;
+const STATE_GAMEOVER = 4;
+
+// Global Variables
+let handPose;
+let video;
+let hands = [];
+let handDetected = false;
+let modelLoaded = false;
+
+// Game Logic
+let level = 1;
+let gridSize = 6;
+let cellSize = 0;
+let mazeOffsetX, mazeOffsetY;
+let grid = [];
+let solutionPath = [];
+let startPos, endPos;
+let playerGridPos = {x:0, y:0};
+let visualOrb = {x:0, y:0};
+let targetHand = {x:0, y:0};
+let tracePoints = [];
+let mistakes = 0;
+const maxMistakes = 5;
+
+// Timers
+let gameState = STATE_WAITING;
+let stateStartTime = 0;
+let showDuration = 8000;
+let feedbackMsg = "";
+let feedbackTimer = 0;
+
+// Audio
+let songs = []; 
+let currentSongIndex = 0;
+
+let songFiles = [
+  "music/song1.mp3",
+  "music/song2.mp3",
+  "music/song3.mp3",
+  "music/song4.mp3"
+];
+
+const instructionModal = document.getElementById('instructions');
+const instructionCloseBtn = document.getElementById('instruction-close');
+
+if (instructionCloseBtn) {
+  instructionCloseBtn.addEventListener('click', () => {
+    if (instructionModal) instructionModal.style.display = 'none';
+  });
+}
+
+function setup() {
+  createCanvas(1280, 720);
+
+  video = createCapture(VIDEO);
+  video.size(640, 480);
+  video.hide(); 
+  
+  updateLoadingStatus("Loading Hand Model...");
+  handPose = ml5.handPose(video, modelReady);
+  
+  loadMusicFiles();
+  startNewLevelSetup();
+}
+
+function updateLoadingStatus(msg) {
+  let el = select('#loading');
+  if(el) el.html(msg);
+}
+
+function modelReady() {
+  console.log("Model Loaded!");
+  modelLoaded = true;
+  handPose.detectStart(video, gotHands);
+  select('#loading').style('display', 'none'); 
+}
+
+function loadMusicFiles() {
+  for(let f of songFiles){
+    loadSound(f, 
+      (loadedSound) => { songs.push(loadedSound); },
+      (err) => { console.log("Failed to load: " + f); }
+    );
+  }
+}
+
+function gotHands(results) {
+  hands = results;
+  handDetected = (hands.length > 0);
+}
+
+function startNewLevelSetup() {
+  if (level > 1 && level % 3 === 0) gridSize = min(gridSize + 1, 10);
+  
+  let mazeAreaH = height * 0.8;
+  cellSize = floor(mazeAreaH / gridSize);
+  let mazePixelW = gridSize * cellSize;
+  
+  mazeOffsetX = (width - mazePixelW) / 2 + 160;
+  mazeOffsetY = (height - mazeAreaH) / 2;
+  
+  generateMaze();
+  
+  let sx = mazeOffsetX + startPos.x * cellSize + cellSize/2;
+  let sy = mazeOffsetY + startPos.y * cellSize + cellSize/2;
+  visualOrb = {x: sx, y: sy};
+  targetHand = {x: sx, y: sy};
+  tracePoints = [{x: sx, y: sy}];
+  
+  mistakes = 0;
+  playerGridPos = { ...startPos };
+  feedbackMsg = "";
+}
+
+function generateMaze() {
+  grid = [];
+  for(let y=0; y<gridSize; y++) {
+    let row = [];
+    for(let x=0; x<gridSize; x++) row.push(1);
+    grid.push(row);
+  }
+  
+  let startX = 0, startY = 0;
+  grid[startY][startX] = 0;
+  
+  let stack = [{x: startX, y: startY}];
+  let visited = new Set([`${startX},${startY}`]);
+  
+  while(stack.length > 0) {
+    let current = stack[stack.length - 1];
+    let cx = current.x; 
+    let cy = current.y;
+    
+    let directions = [[0,-2], [0,2], [-2,0], [2,0]]; 
+    directions = shuffleArray(directions);
+    
+    let moved = false;
+    for(let d of directions) {
+      let nx = cx + d[0];
+      let ny = cy + d[1];
+      
+      if(nx >= 0 && nx < gridSize && ny >= 0 && ny < gridSize && !visited.has(`${nx},${ny}`)) {
+        grid[cy + d[1]/2][cx + d[0]/2] = 0; 
+        grid[ny][nx] = 0;
+        visited.add(`${nx},${ny}`);
+        stack.push({x: nx, y: ny});
+        moved = true;
+        break;
+      }
+    }
+    if(!moved) stack.pop();
+  }
+  
+  startPos = {x:0, y:0};
+  
+  let bestDist = 0;
+  endPos = {x:0, y:0};
+  for(let y=0; y<gridSize; y++){
+    for(let x=0; x<gridSize; x++){
+      if(grid[y][x] === 0) {
+        let d = abs(x-startPos.x) + abs(y-startPos.y);
+        if(d > bestDist) {
+          bestDist = d;
+          endPos = {x, y};
+        }
+      }
+    }
+  }
+  
+  solvePathBFS();
+}
+
+function solvePathBFS() {
+  let queue = [{pos: startPos, path: [startPos]}];
+  let visited = new Set([`${startPos.x},${startPos.y}`]);
+  
+  while(queue.length > 0) {
+    let {pos, path} = queue.shift();
+    if(pos.x === endPos.x && pos.y === endPos.y) {
+      solutionPath = path;
+      return;
+    }
+    
+    let dirs = [[0,-1], [0,1], [-1,0], [1,0]];
+    for(let d of dirs) {
+      let nx = pos.x + d[0];
+      let ny = pos.y + d[1];
+      
+      if(nx >=0 && nx < gridSize && ny >= 0 && ny < gridSize && 
+         grid[ny][nx] === 0 && !visited.has(`${nx},${ny}`)) {
+        visited.add(`${nx},${ny}`);
+        queue.push({
+          pos: {x:nx, y:ny},
+          path: [...path, {x:nx, y:ny}]
+        });
+      }
+    }
+  }
+}
+
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+function draw() {
+  background(C_BG);
+  if(!modelLoaded) return;
+
+  handleVision();
+  drawUI();
+  drawMaze();
+  handleLogic();
+}
+
+function handleVision() {
+  if (hands.length > 0) {
+    let hand = hands[0];
+    let indexTip = hand.keypoints[8]; 
+    
+    let mx = width - (indexTip.x / video.width * width);
+    let my = indexTip.y / video.height * height;
+    
+    let margin = 100;
+    let mappedX = map(mx, 0, width, -margin, width + margin);
+    let mappedY = map(my, 0, height, -margin, height + margin);
+    
+    targetHand.x = constrain(mappedX, 0, width);
+    targetHand.y = constrain(mappedY, 0, height);
+  }
+  
+  visualOrb.x = lerp(visualOrb.x, targetHand.x, 0.1);
+  visualOrb.y = lerp(visualOrb.y, targetHand.y, 0.1);
+}
+
+function handleLogic() {
+  let now = millis();
+  
+  if (gameState === STATE_WAITING) {
+    if(handDetected) {
+      gameState = STATE_SHOWING;
+      stateStartTime = now;
+    }
+  } 
+  else if (gameState === STATE_SHOWING) {
+    if (now - stateStartTime > showDuration) {
+      gameState = STATE_DELAY;
+      stateStartTime = now;
+    }
+  }
+  else if (gameState === STATE_DELAY) {
+    if (now - stateStartTime > 2000) {
+      gameState = STATE_PLAYING;
+      tracePoints = [{...visualOrb}];
+    }
+  }
+  else if (gameState === STATE_PLAYING) {
+    let last = tracePoints[tracePoints.length-1];
+    let d = dist(visualOrb.x, visualOrb.y, last.x, last.y);
+    if(d > 5) tracePoints.push({x: visualOrb.x, y: visualOrb.y});
+    
+    let gx = floor((visualOrb.x - mazeOffsetX) / cellSize);
+    let gy = floor((visualOrb.y - mazeOffsetY) / cellSize);
+    
+    if(gx >=0 && gx < gridSize && gy >=0 && gy < gridSize) {
+      if(grid[gy][gx] === 1) {
+        if(gx !== playerGridPos.x || gy !== playerGridPos.y) {
+           mistakes++;
+           feedbackMsg = "HEDGE!";
+           feedbackTimer = millis();
+           if(mistakes >= maxMistakes) gameState = STATE_GAMEOVER;
+        }
+      } else {
+        let onPath = false;
+        for(let node of solutionPath) {
+          let nx = mazeOffsetX + node.x * cellSize + cellSize/2;
+          let ny = mazeOffsetY + node.y * cellSize + cellSize/2;
+          if(dist(visualOrb.x, visualOrb.y, nx, ny) < cellSize * 0.6) onPath = true;
+        }
+        if(!onPath) {
+          feedbackMsg = "OFF PATH";
+          feedbackTimer = millis();
+        }
+      }
+      
+      playerGridPos = {x:gx, y:gy};
+      
+      if(gx === endPos.x && gy === endPos.y) {
+        gameState = STATE_WIN;
+        stateStartTime = millis();
+        playMusic();
+      }
+    }
+  }
+  else if (gameState === STATE_WIN) {
+    if(millis() - stateStartTime > 7000) {
+      stopMusic();
+      level++;
+      startNewLevelSetup();
+      gameState = STATE_SHOWING;
+      stateStartTime = millis();
+    }
+  }
+}
+
+function playMusic() {
+  if(songs.length > 0) {
+    let song = songs[currentSongIndex % songs.length];
+    if(song.isLoaded()) {
+      song.play();
+      song.setVolume(0.5);
+    }
+    currentSongIndex++;
+  }
+}
+
+function stopMusic() {
+  for(let s of songs) s.stop();
+}
+
+function drawMaze() {
+  for(let y=0; y<gridSize; y++) {
+    for(let x=0; x<gridSize; x++) {
+      let px = mazeOffsetX + x * cellSize;
+      let py = mazeOffsetY + y * cellSize;
+      
+      noStroke();
+      if(grid[y][x] === 1) {
+        fill(C_WALL);
+        rect(px, py, cellSize, cellSize, 8);
+        stroke(60, 80, 30);
+        strokeWeight(2);
+        noFill();
+        rect(px+2, py+2, cellSize-4, cellSize-4, 8);
+      } else {
+        stroke(C_GRID);
+        strokeWeight(1);
+        noFill();
+        rect(px, py, cellSize, cellSize);
+      }
+    }
+  }
+  
+  if(gameState === STATE_SHOWING) {
+    let elapsed = millis() - stateStartTime;
+    let progress = elapsed / showDuration;
+    let steps = floor(solutionPath.length * progress);
+    
+    strokeWeight(8);
+    
+    for(let i=0; i<min(steps, solutionPath.length); i++) {
+      let p = solutionPath[i];
+      let px = mazeOffsetX + p.x * cellSize + cellSize/2;
+      let py = mazeOffsetY + p.y * cellSize + cellSize/2;
+      
+      noStroke();
+      fill(C_PATH);
+      circle(px, py, cellSize/4);
+      
+      if(i > 0) {
+        let prev = solutionPath[i-1];
+        let ppx = mazeOffsetX + prev.x * cellSize + cellSize/2;
+        let ppy = mazeOffsetY + prev.y * cellSize + cellSize/2;
+        stroke(C_PATH);
+        line(ppx, ppy, px, py);
+      }
+    }
+    
+    let cx = mazeOffsetX + (gridSize*cellSize)/2;
+    let rem = max(0, 1 - progress);
+    noStroke();
+    fill(220);
+    rect(cx - 200, 70, 400, 10);
+    fill(C_PATH);
+    rect(cx - 200, 70, 400 * rem, 10);
+    
+    fill(C_PATH);
+    noStroke();
+    textAlign(CENTER);
+    textSize(40);
+    textStyle(BOLD);
+    text("WATCH THE PATH", cx, 50);
+  }
+  
+  if(tracePoints.length > 1) {
+    noFill();
+    stroke(C_TRACE);
+    strokeWeight(6);
+    beginShape();
+    for(let p of tracePoints) vertex(p.x, p.y);
+    endShape();
+  }
+  
+  let sx = mazeOffsetX + startPos.x * cellSize + cellSize/2;
+  let sy = mazeOffsetY + startPos.y * cellSize + cellSize/2;
+  let ex = mazeOffsetX + endPos.x * cellSize + cellSize/2;
+  let ey = mazeOffsetY + endPos.y * cellSize + cellSize/2;
+  
+  noStroke();
+  fill(C_SEED);
+  ellipse(sx, sy, 20, 30); 
+  drawFlower(ex, ey, cellSize/2);
+  
+  if(gameState !== STATE_DELAY) {
+    noStroke();
+    fill(255, 165, 0, 100);
+    circle(visualOrb.x, visualOrb.y, cellSize);
+    fill(C_PLAYER);
+    circle(visualOrb.x, visualOrb.y, cellSize/3);
+  }
+  
+  let cx = mazeOffsetX + (gridSize*cellSize)/2;
+  let cy = height/2;
+  textAlign(CENTER);
+  textStyle(BOLD);
+  
+  if(gameState === STATE_WAITING) {
+    fill(0, 150);
+    rect(0,0,width,height);
+    fill(C_TEXT);
+    textSize(50);
+    text("RAISE HAND TO BEGIN", width/2, height/2);
+    textSize(20);
+    text("Ensure your camera is enabled", width/2, height/2 + 40);
+  } else if(gameState === STATE_DELAY) {
+    fill(C_PLAYER_GLOW);
+    textSize(50);
+    text("READY...", cx, cy);
+  } else if(gameState === STATE_WIN) {
+    fill(C_FLOWER);
+    textSize(50);
+    text("BLOOM!", cx, cy);
+  } else if(gameState === STATE_GAMEOVER) {
+    fill(C_STATUS_ERROR);
+    textSize(50);
+    text("TRY AGAIN", cx, cy);
+    textSize(30);
+    fill(C_TEXT);
+    text("Reload page to restart", cx, cy + 50);
+  }
+  
+  if(millis() - feedbackTimer < 1000 && feedbackMsg !== "") {
+    fill(C_STATUS_WARNING);
+    textSize(24);
+    text(feedbackMsg, visualOrb.x, visualOrb.y - cellSize);
+  }
+}
+
+function drawUI() {
+  let px = 30, py = height/2 - 200, pw = 320, ph = 400;
+  
+  fill(C_UI_PANEL);
+  stroke(220);
+  strokeWeight(2);
+  rect(px, py, pw, ph, 15);
+  
+  push();
+  translate(px+20 + 280, py+20);
+  scale(-1, 1); 
+  image(video, 0, 0, 280, 210);
+  
+  if(hands.length > 0) {
+    let hand = hands[0];
+    
+    noStroke();
+    fill(0, 255, 0);
+    for(let kp of hand.keypoints) {
+      let x = kp.x * (280/640);
+      let y = kp.y * (210/480);
+      circle(x, y, 5);
+    }
+    
+    stroke(0, 255, 0);
+    strokeWeight(2);
+    
+    let fingers = [[0,1,2,3,4], [0,5,6,7,8], [0,9,10,11,12], [0,13,14,15,16], [0,17,18,19,20]];
+    for(let f of fingers) {
+      for(let i=0; i<f.length-1; i++) {
+        let p1 = hand.keypoints[f[i]];
+        let p2 = hand.keypoints[f[i+1]];
+        line(p1.x*(280/640), p1.y*(210/480), p2.x*(280/640), p2.y*(210/480));
+      }
+    }
+  }
+  pop();
+  
+  noFill();
+  strokeWeight(4);
+  if(handDetected) stroke(C_STATUS_PERFECT);
+  else stroke(C_STATUS_ERROR);
+  rect(px+20, py+20, 280, 210);
+  
+  noStroke();
+  fill(C_TEXT);
+  textAlign(LEFT);
+  textSize(20);
+  text("CHANCES", px+20, py+260);
+  
+  let left = maxMistakes - mistakes;
+  for(let i=0; i<maxMistakes; i++) {
+    if(i < left) drawFlower(px + 40 + i*50, py+290, 20);
+    else {
+      fill(220);
+      circle(px + 40 + i*50, py+290, 15);
+    }
+  }
+  
+  fill(C_TEXT);
+  textSize(40);
+  text("LEVEL " + level, px+20, py+350);
+}
+
+function drawFlower(x, y, s) {
+  noStroke();
+  fill(C_FLOWER);
+  let pr = s/3;
+  circle(x-pr, y-pr, s/1.5);
+  circle(x+pr, y-pr, s/1.5);
+  circle(x-pr, y+pr, s/1.5);
+  circle(x+pr, y+pr, s/1.5);
+  fill(255, 255, 0);
+  circle(x, y, s/2);
+}
+
+const C_STATUS_PERFECT = "#27ae60";
+const C_STATUS_WARNING = "#f39c12";
+const C_STATUS_ERROR = "#c0392b";
+
+function keyPressed() {
+  if (key === 'n') { 
+    gameState = STATE_WIN;
+    stateStartTime = millis();
+    playMusic();
+  }
+}
+</script>
+</body>
+</html>
